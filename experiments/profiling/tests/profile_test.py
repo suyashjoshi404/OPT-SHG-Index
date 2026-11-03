@@ -84,7 +84,20 @@ def main():
                     run(*search)
                     first = read_csv(result)
                     run(*search)
-                    assert first == read_csv(result), "Repeated search changed graph work or recall"
+                    second = read_csv(result)
+                    for row in first + second:
+                        row.pop("query_latency_us")  # Wall time varies between runs.
+                    assert first == second, "Repeated search changed graph work or recall"
+                    variant = "off" if algorithm == "hnsw" else "baseline"
+                    variant_result = root / f"{dataset}_{algorithm}_{variant}.results.csv"
+                    run(*search, "--prefetch-mode", variant,
+                        "--output", variant_result,
+                        "--performance-output", root / f"{dataset}_{algorithm}_{variant}.performance.csv",
+                        "--layer-averages-output", root / f"{dataset}_{algorithm}_{variant}.averages.csv")
+                    variant_rows = read_csv(variant_result)
+                    for row in variant_rows:
+                        row.pop("query_latency_us")
+                    assert first == variant_rows, "Prefetch mode changed graph work or recall"
                 finally:
                     hidden.rename(base)
                 assert digests == [hashlib.sha256(path.read_bytes()).digest() for path in saved]

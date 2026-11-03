@@ -12,6 +12,7 @@ from statistics import fmean, stdev
 def summarize(run_dir):
     measurements = defaultdict(list)
     for path in sorted(run_dir.glob("*/*/ef*_k*/repeat*_performance.csv")):
+        dataset, configuration = path.relative_to(run_dir).parts[:2]
         with path.open(newline="") as handle:
             rows = list(csv.DictReader(handle))
         if len(rows) != 1 or rows[0]["phase"] != "search":
@@ -20,33 +21,54 @@ def summarize(run_dir):
         if (int(row["M"]), int(row["ef_construction"]), int(row["k"]),
                 int(row["threads"])) != (48, 80, 20, 1):
             raise ValueError(f"Expected M48/efC80/k20/threads1 in {path}")
-        key = row["dataset"], row["algorithm"], int(row["ef_search"])
+        if row["dataset"] != dataset or row["algorithm"] != configuration.split("_", 1)[0]:
+            raise ValueError(f"Dataset or algorithm does not match directory in {path}")
+        key = dataset, configuration, int(row["ef_search"])
         measurements[key].append(row)
-    expected = {(dataset, algorithm, ef)
-                for dataset in ("sift", "enron") for algorithm in ("hnsw", "shg")
+    configurations = {key[1] for key in measurements}
+    legacy = {"hnsw", "shg"}
+    four_modes = {"hnsw_off", "hnsw_native", "shg_baseline", "shg_lookahead"}
+    if configurations not in (legacy, four_modes):
+        raise ValueError(f"Expected legacy or four-mode sweep, found {configurations}")
+    expected = {(dataset, configuration, ef)
+                for dataset in ("sift", "enron") for configuration in configurations
                 for ef in (20, 24, 32, 48, 64, 96, 128, 192, 256, 512)}
     if set(measurements) != expected:
         raise ValueError(f"Incomplete or unexpected sweep: missing {expected - set(measurements)}, "
                          f"extra {set(measurements) - expected}")
     summary = []
-    for (dataset, algorithm, ef), rows in sorted(measurements.items()):
+    for (dataset, configuration, ef), rows in sorted(measurements.items()):
         if len(rows) != 5:
-            raise ValueError(f"Expected five repeats for {dataset}/{algorithm}/ef{ef}")
+            raise ValueError(f"Expected five repeats for {dataset}/{configuration}/ef{ef}")
         count = 10000 if dataset == "sift" else 200
         if {int(r["count"]) for r in rows} != {count}:
-            raise ValueError(f"Unexpected query count for {dataset}/{algorithm}/ef{ef}")
+            raise ValueError(f"Unexpected query count for {dataset}/{configuration}/ef{ef}")
         recalls = [float(r["recall_at_k"]) for r in rows]
         if not all(math.isclose(r, recalls[0], abs_tol=1e-8) for r in recalls):
-            raise ValueError(f"Recall differs between repeats for {dataset}/{algorithm}/ef{ef}")
+            raise ValueError(f"Recall differs between repeats for {dataset}/{configuration}/ef{ef}")
         latencies = [float(r["average_latency_us"]) / 1000 for r in rows]
         if not all(math.isfinite(t) and t > 0 for t in latencies):
             raise ValueError("Latency must be finite and positive")
-        summary.append(dict(dataset=dataset, algorithm=algorithm, M=48,
+        summary.append(dict(dataset=dataset, configuration=configuration,
+                            algorithm=rows[0]["algorithm"],
+                            prefetch_mode=configuration.split("_", 1)[1] if "_" in configuration else "",
+                            M=48,
                             ef_construction=80, k=20, ef_search=ef, repeats=5,
                             query_count=count, mean_recall_at_k=fmean(recalls),
                             mean_latency_ms=fmean(latencies),
                             std_latency_ms=stdev(latencies),
                             min_latency_ms=min(latencies), max_latency_ms=max(latencies)))
+    if configurations == four_modes:
+        by_key = {(row["dataset"], row["configuration"], row["ef_search"]): row
+                  for row in summary}
+        for dataset in ("sift", "enron"):
+            for ef in (20, 24, 32, 48, 64, 96, 128, 192, 256, 512):
+                for first, second in (("hnsw_off", "hnsw_native"),
+                                      ("shg_baseline", "shg_lookahead")):
+                    left = by_key[dataset, first, ef]["mean_recall_at_k"]
+                    right = by_key[dataset, second, ef]["mean_recall_at_k"]
+                    if not math.isclose(left, right, rel_tol=0, abs_tol=1e-8):
+                        raise ValueError(f"Prefetch modes differ in recall: {dataset}/ef{ef}/{first}/{second}")
     return summary
 
 
@@ -65,16 +87,24 @@ def main():
                          "xtick.direction": "in", "ytick.direction": "in",
                          "pdf.fonttype": 42})
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.8))
+    configurations = {row["configuration"] for row in summary}
+    styles = (("hnsw_off", "HNSW, hints off", "black", "D", "--"),
+              ("hnsw_native", "HNSW, native hints", "black", "D", "-"),
+              ("shg_baseline", "SHG, hints off", "red", "o", "--"),
+              ("shg_lookahead", "SHG, lookahead", "red", "o", "-"))
+    if configurations == {"hnsw", "shg"}:
+        styles = (("hnsw", "HNSW", "black", "D", "-"),
+                  ("shg", "SHG", "red", "o", "-."))
     for index, (dataset, title) in enumerate((("sift", "SIFT1M"), ("enron", "Enron"))):
         ax = axes[index]
-        for algorithm, color, marker in (("shg", "red", "o"), ("hnsw", "black", "D")):
+        for configuration, label, color, marker, linestyle in styles:
             points = sorted((r for r in summary if r["dataset"] == dataset
-                             and r["algorithm"] == algorithm), key=lambda r: r["ef_search"])
+                             and r["configuration"] == configuration), key=lambda r: r["ef_search"])
             ax.plot([r["mean_latency_ms"] for r in points],
                     [r["mean_recall_at_k"] for r in points],
                     color=color, marker=marker, markerfacecolor="none",
-                    markersize=5, markeredgewidth=0.8, linestyle="-.",
-                    linewidth=0.8, label=algorithm.upper())
+                    markersize=5, markeredgewidth=0.8, linestyle=linestyle,
+                    linewidth=0.8, label=label)
         ax.set_xlabel("Time (ms)")
         ax.set_ylabel("Recall@20")
         ax.set_ylim(top=1.005)
@@ -90,7 +120,7 @@ def main():
     fig.tight_layout(rect=(0, 0.055, 1, 0.94), w_pad=2)
     output_dir = args.run_dir / "plots"
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = output_dir / "hnsw_shg_ef_search_sweep_M48_efc80_k20_mean"
+    stem = output_dir / "hnsw_shg_prefetch_ef_search_sweep_M48_efc80_k20_mean"
     for extension in ("png", "pdf", "svg"):
         path = stem.with_suffix("." + extension)
         fig.savefig(path, dpi=220, bbox_inches="tight", facecolor="white")

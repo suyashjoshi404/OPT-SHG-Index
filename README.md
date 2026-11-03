@@ -33,3 +33,20 @@ Convert other datasets to this format, name the file `[datasetName].data_new`, a
 For reproducible SIFT1M and Enron build/search measurements, query-local
 per-layer hops and distance statistics, recall and CSV reports, see
 [experiments/profiling/README.md](experiments/profiling/README.md).
+
+## SHG software prefetching
+
+SHG search defaults to shortcut destination prefetching and two-neighbor
+lookahead in the base layer. The hints do not change graph traversal or
+distance calculations. Select a mode on an `HEDS` instance before searching:
+
+```cpp
+index.setPrefetchMode(hnswlib::PrefetchMode::Baseline);          // no hints
+index.setPrefetchMode(hnswlib::PrefetchMode::Skip);              // destination only
+index.setPrefetchMode(hnswlib::PrefetchMode::SkipAndLookahead);  // default
+index.setPrefetchMode(hnswlib::PrefetchMode::Cluster);           // also prefetch two neighbors
+```
+
+Cluster mode builds a small per-node lookup table and is optional because its
+extra memory traffic can make searches slower. Mode changes should happen
+between searches, not concurrently with them.

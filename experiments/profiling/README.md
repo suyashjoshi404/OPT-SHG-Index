@@ -2,6 +2,8 @@
 
 This experiment builds and profiles SIFT1M or Enron with native
 `hnswlib::HierarchicalNSW<float>` (HNSW) and `hnswlib::HEDS<float>` (SHG).
+HNSW can run with its existing search-time software prefetch hints enabled
+(`native`) or disabled (`off`). SHG has its own shortcut-aware prefetch modes.
 The same C++ driver runs both algorithms sequentially. Python scripts launch
 it; FAISS and NumPy are not needed. Run all commands from the repository root.
 
@@ -54,6 +56,46 @@ build/profiling/hnsw_profile --check-data --dataset enron
 Full loading also checks record headers, lengths, and dimensions.
 
 ## Build indexes and profile queries
+
+The following runs four search configurations on SIFT1M. Both graph builds
+use `M=48`, `ef_construction=80`, and seed `100`. Each pair of modes loads
+the same index for its algorithm. The two algorithms build different graphs.
+Run these commands from the repository root after building the driver:
+
+```bash
+python3 experiments/profiling/scripts/build_hnsw_index.py --dataset sift --M 48 --ef-construction 80 --seed 100
+python3 experiments/profiling/scripts/build_shg_index.py --dataset sift --M 48 --ef-construction 80 --seed 100
+
+# HNSW without search-time software prefetch hints
+python3 experiments/profiling/scripts/profile_hnsw_query.py --dataset sift --M 48 --ef-construction 80 --k 20 --ef-search 64 --prefetch-mode off
+
+# The same HNSW index with its original software prefetch hints
+python3 experiments/profiling/scripts/profile_hnsw_query.py --dataset sift --M 48 --ef-construction 80 --k 20 --ef-search 64 --prefetch-mode native
+
+# HEDS/SHG without the added software prefetch hints
+python3 experiments/profiling/scripts/profile_shg_query.py --dataset sift --M 48 --ef-construction 80 --k 20 --ef-search 64 --prefetch-mode baseline
+
+# HEDS/SHG with shortcut destination and base-layer lookahead prefetching
+python3 experiments/profiling/scripts/profile_shg_query.py --dataset sift --M 48 --ef-construction 80 --k 20 --ef-search 64 --prefetch-mode lookahead
+```
+
+Replace `sift` with `enron` in every command to run Enron. Existing index
+files are protected: add `--force` to a build command only when intentionally
+rebuilding it. SHG `baseline` disables the added search prefetch hints;
+`skip` enables destination prefetching alone, while `cluster` also prefetches
+two candidate neighbors. Cluster mode is experimental. The defaults are
+`native` for HNSW and `lookahead` for SHG. Set the mode before timing; no
+rebuild is needed to switch modes.
+
+These are **search-time** modes. Each algorithm's two runs differ only in
+search prefetch hints and reuse their algorithm's saved index. Native HNSW's
+build-time prefetch instructions remain unchanged in both HNSW runs. SHG uses
+a different index and search procedure from HNSW.
+The Python wrappers give nondefault modes distinct default result and
+observation paths; for repeated runs, specify unique `--output`,
+`--performance-output`, and `--layer-averages-output` paths.
+
+### Other parameter choices
 
 ```bash
 python3 experiments/profiling/scripts/build_hnsw_index.py --dataset sift --M 16 --ef-construction 200 --seed 100 --force

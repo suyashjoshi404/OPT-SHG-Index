@@ -4,6 +4,7 @@
 #include "hnswlib.h"
 #include "basis.h"
 #include "search_stats.h"
+#include "prefetch_controller.h"
 #include <atomic>
 #include <random>
 #include <stdlib.h>
@@ -12,6 +13,7 @@
 #include <list>
 #include <memory>
 #include <cmath>
+#include <array>
 
 #include "../pgm/pgm_index.hpp"
 #include "../pgm/pgm_index_variants.hpp"
@@ -89,6 +91,8 @@ class HEDS : public AlgorithmInterface<dist_t> {
     dist_t dis_bound = 0;
 
     std::vector<dist_t> resultsProcessing;
+    PrefetchMode prefetch_mode_ = PrefetchMode::SkipAndLookahead;
+    std::vector<std::array<tableint, 2>> cluster_targets_;
 
 
     HEDS(SpaceInterface<dist_t> *s) {
@@ -185,6 +189,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
     }
 
     void clear() {
+        cluster_targets_.clear();
         //std::cout << "free data_rep_memory11" << std::endl;
         free(data_rep_memory_);
         data_rep_memory_ = nullptr;
@@ -214,6 +219,26 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
     void setEf(size_t ef) {
         ef_ = ef;
+    }
+
+    void setPrefetchMode(PrefetchMode mode) {
+        prefetch_mode_ = mode;
+        if (mode == PrefetchMode::Cluster) buildPrefetchTargets();
+        else cluster_targets_.clear();
+    }
+
+    void buildPrefetchTargets() {
+        cluster_targets_.clear();
+        if (!data_level0_memory_) return;
+        const size_t count = cur_element_count;
+        cluster_targets_.assign(count, {{static_cast<tableint>(count), static_cast<tableint>(count)}});
+        for (size_t node = 0; node < count; ++node) {
+            linklistsizeint* links = get_linklist0(static_cast<tableint>(node));
+            const size_t degree = getListCount(links);
+            const tableint* neighbors = reinterpret_cast<const tableint*>(links + 1);
+            for (size_t j = 0; j < std::min(degree, size_t(2)); ++j)
+                if (neighbors[j] < count) cluster_targets_[node][j] = neighbors[j];
+        }
     }
 
 
@@ -500,7 +525,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
         }
         if (!denseDensity.empty()) dis_bound = denseDensity.back();
         shortcutsSize = Shortcuts.size(); 
-   
+        if (prefetch_mode_ == PrefetchMode::Cluster) buildPrefetchTargets();
     }
 
     //Given the entry data, query data, current level and calculate dis, then return the skipped level
@@ -542,6 +567,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
 
         for(int level = maxlevel_; level > 0;){
+            const int origin_level = level;
             dist_t curdist = getDisByLevel(query.query_Id, currObj, level);
             if (stats) stats->add_distance(level, true, true);
             remember_distance(currObj, level, curdist);
@@ -597,6 +623,20 @@ class HEDS : public AlgorithmInterface<dist_t> {
                 if(skip_to_level == level) {level --;} 
                 if (stats && level < previous_level - 1)
                     stats->layers[previous_level].levels_skipped += previous_level - level - 1;
+            }
+            PrefetchController::on_layer_transition(
+                prefetch_mode_, currObj, level,
+                [this](tableint id, int destination) -> const void* {
+                    return destination == 0 ? static_cast<const void*>(get_linklist0(id))
+                                            : static_cast<const void*>(get_linklist(id, destination));
+                },
+                [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                data_size_, level == 0 ? size_links_level0_ : size_links_per_element_, cur_element_count);
+            if (prefetch_mode_ == PrefetchMode::Cluster &&
+                (level == 0 || level < origin_level - 1) && currObj < cluster_targets_.size()) {
+                for (tableint target : cluster_targets_[currObj])
+                    if (target < cur_element_count)
+                        PrefetchController::prefetch_lines(getDataByInternalId(target), data_size_, 2);
             }
         }
 
@@ -795,6 +835,11 @@ class HEDS : public AlgorithmInterface<dist_t> {
             tableint current_node_id = current_node_pair.second;
             int *data = (int *) get_linklist0(current_node_id);
             size_t size = getListCount((linklistsizeint*)data);
+            if (!candidate_set.empty())
+                PrefetchController::on_next_candidate(
+                    prefetch_mode_, candidate_set.top().second,
+                    [this](tableint id) -> const void* { return get_linklist0(id); },
+                    size_links_level0_, cur_element_count);
 //                bool cur_node_deleted = isMarkedDeleted(current_node_id);
             if (collect_metrics) {
                 metric_hops++;
@@ -805,6 +850,10 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
             for (size_t j = 1; j <= size; j++) {
                 int candidate_id = *(data + j);
+                PrefetchController::on_neighbor_lookahead(
+                    prefetch_mode_, data, j, size, visited_array,
+                    [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                    data_size_, cur_element_count);
 //                    if (candidate_id == 0) continue;
 
                 if (!(visited_array[candidate_id] == visited_array_tag)) {
@@ -938,6 +987,11 @@ class HEDS : public AlgorithmInterface<dist_t> {
             if (stats) stats->add_hop(0);
             int *data = (int *) get_linklist0(current_node_id);
             size_t size = getListCount((linklistsizeint*)data);
+            if (!candidate_set.empty())
+                PrefetchController::on_next_candidate(
+                    prefetch_mode_, candidate_set.top().second,
+                    [this](tableint id) -> const void* { return get_linklist0(id); },
+                    size_links_level0_, cur_element_count);
             
 
 
@@ -950,6 +1004,10 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
             for (size_t j = 1; j <= size; j++) {
                 int candidate_id = *(data + j);
+                PrefetchController::on_neighbor_lookahead(
+                    prefetch_mode_, data, j, size, visited_array,
+                    [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                    data_size_, cur_element_count);
 
 
                 if(pruneDisCompute(lowerBound, 0, queryID, candidate_id, resultsProcessing)){

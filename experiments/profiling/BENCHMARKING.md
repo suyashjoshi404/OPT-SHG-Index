@@ -1,14 +1,74 @@
 # Reproducible HNSW and SHG profiling
 
+## Compare HNSW and HEDS/SHG with and without prefetching
+
+Build the driver and check dataset files as described in [README.md](README.md).
+The commands below run from the repository root. Use one HNSW index for both
+HNSW modes and one SHG index for both SHG modes. Build parameters, query set,
+`k`, and `ef_search` are identical. Set `dataset=enron` to run Enron instead
+of SIFT1M. These commands build two graphs once and run five searches per
+configuration:
+
+```bash
+(
+set -e
+dataset=sift
+scripts=experiments/profiling/scripts
+run_root="experiments/profiling/observations/prefetch_comparison/${dataset}"
+hnsw_index="experiments/profiling/indexes/${dataset}/${dataset}_hnsw_prefetch_comparison_M48.index"
+shg_index="experiments/profiling/indexes/${dataset}/${dataset}_shg_prefetch_comparison_M48.index"
+
+python3 "$scripts/build_hnsw_index.py" --dataset "$dataset" --M 48 --ef-construction 80 --seed 100 --index-file "$hnsw_index"
+python3 "$scripts/build_shg_index.py" --dataset "$dataset" --M 48 --ef-construction 80 --seed 100 --index-file "$shg_index"
+
+for configuration in hnsw_off hnsw_native shg_baseline shg_lookahead; do
+  algorithm=${configuration%%_*}
+  mode=${configuration#*_}
+  if [ "$algorithm" = hnsw ]; then index_file=$hnsw_index
+  else index_file=$shg_index; fi
+  for repeat in 1 2 3 4 5; do
+    output_dir="${run_root}/${configuration}/repeat${repeat}"
+    mkdir -p "$output_dir"
+    python3 "$scripts/profile_${algorithm}_query.py" \
+      --dataset "$dataset" --M 48 --ef-construction 80 \
+      --index-file "$index_file" --k 20 --ef-search 64 --warmup 500 \
+      --prefetch-mode "$mode" \
+      --output "${output_dir}/layer_stats.csv" \
+      --performance-output "${output_dir}/performance.csv" \
+      --layer-averages-output "${output_dir}/layer_averages.csv"
+  done
+done
+)
+```
+
+The HNSW `off` mode suppresses only the existing SSE search prefetch hints in
+`HierarchicalNSW::searchBaseLayerST`; `native` leaves them enabled. HNSW
+construction is identical in both runs, including any build-time prefetching.
+HEDS/SHG `baseline` disables the added search-time prefetch hints;
+`lookahead` enables shortcut destination and two-neighbor lookahead prefetching
+in `HEDS::searchKnnShortcuts`. Both SHG runs use the same saved SHG index.
+`skip` and `cluster` are additional SHG modes. On a build without SSE support,
+native HNSW search hints are compiled out, so `off` and `native` are equivalent.
+
+Each repeat has its own performance CSV. Compare mean `average_latency_us`,
+`queries_per_second`, and `recall_at_k` across the five files. HNSW `off` and
+`native` should have the same recall and search work; the same applies to SHG
+`baseline` and `lookahead`. Compare each pair at equal `ef_search` on its saved
+index. Compare HNSW with SHG at matched recall as well as equal `ef_search`,
+because their graph and search algorithms differ.
+Warm up and pin all runs consistently if measuring small timing differences.
+
 ## Recall–latency curve: sweep efSearch with fixed build parameters
 
-Build the driver as shown in [README.md](README.md), then run from the
-repository root. Fix `M=48`,
+This sweep compares HNSW `off` and `native`, plus SHG `baseline` and
+`lookahead`. Build the driver as shown in [README.md](README.md), then run
+from the repository root. Fix `M=48`,
 `ef_construction=80`, seed `100`, `k=20`, one thread, and 500 warm-up queries
 for both algorithms. Sweep `ef_search` through
 `20 24 32 48 64 96 128 192 256 512` on each saved index and query set. Each
 value is at least k. Build each dataset/algorithm index once and run five
-searches at each breadth: four builds and 200 search processes total.
+searches per prefetch mode at each breadth: four builds and 400 search
+processes total. Each pair of modes reuses the same index.
 
 This standalone sweep writes to a unique results and observations directory.
 It rebuilds its indexes with `--force`. To reuse them later, omit the build
@@ -42,22 +102,27 @@ for dataset in sift enron; do
       --index-file "$index_file" --force \
       --performance-output "${observation_dir}/build_performance.csv"
 
-    for ef_search in 20 24 32 48 64 96 128 192 256 512; do
-      result_dir="${results_root}/${dataset}/${algorithm}/M${M}_efc${ef_construction}_ef${ef_search}_k${k}"
-      search_observation_dir="${observation_dir}/ef${ef_search}_k${k}"
-      mkdir -p "$result_dir" "$search_observation_dir"
+    if [ "$algorithm" = hnsw ]; then modes="off native"
+    else modes="baseline lookahead"; fi
+    for mode in $modes; do
+      configuration="${algorithm}_${mode}"
+      for ef_search in 20 24 32 48 64 96 128 192 256 512; do
+        result_dir="${results_root}/${dataset}/${configuration}/M${M}_efc${ef_construction}_ef${ef_search}_k${k}"
+        search_observation_dir="${observations_root}/${dataset}/${configuration}/ef${ef_search}_k${k}"
+        mkdir -p "$result_dir" "$search_observation_dir"
 
-      for repeat in 1 2 3 4 5; do
-        OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-          numactl --physcpubind=2 --membind=0 \
-          python3 "$scripts/profile_${algorithm}_query.py" \
-          --dataset "$dataset" --data-root "$data_root" \
-          --M "$M" --ef-construction "$ef_construction" \
-          --k "$k" --ef-search "$ef_search" --threads 1 --warmup 500 \
-          --index-file "$index_file" \
-          --output "${result_dir}/repeat${repeat}_layer_stats.csv" \
-          --performance-output "${search_observation_dir}/repeat${repeat}_performance.csv" \
-          --layer-averages-output "${search_observation_dir}/repeat${repeat}_layer_averages.csv"
+        for repeat in 1 2 3 4 5; do
+          OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+            numactl --physcpubind=2 --membind=0 \
+            python3 "$scripts/profile_${algorithm}_query.py" \
+            --dataset "$dataset" --data-root "$data_root" \
+            --M "$M" --ef-construction "$ef_construction" \
+            --k "$k" --ef-search "$ef_search" --threads 1 --warmup 500 \
+            --prefetch-mode "$mode" --index-file "$index_file" \
+            --output "${result_dir}/repeat${repeat}_layer_stats.csv" \
+            --performance-output "${search_observation_dir}/repeat${repeat}_performance.csv" \
+            --layer-averages-output "${search_observation_dir}/repeat${repeat}_layer_averages.csv"
+        done
       done
     done
   done
@@ -67,12 +132,13 @@ echo "Sweep observations: $observations_root"
 )
 ```
 
-Plot one point per `ef_search` value for each dataset and algorithm. Use full
+Plot one point per `ef_search` value for each dataset and configuration. Use full
 query-set `recall_at_k` and mean `average_latency_us / 1000` across five
 performance rows. Plot milliseconds against recall, connect points in
-increasing `ef_search` order, and compare algorithms at matched recall. Verify
-recall is consistent across repeats before averaging; error bars may show
-latency spread. All points use the same complete query set. Do not group
+increasing `ef_search` order. Compare each algorithm's two modes at the same
+`ef_search` and compare algorithms at matched recall. Verify recall is
+consistent across repeats and between modes of the same algorithm; error
+bars may show latency spread. All points use the same complete query set. Do not group
 queries by recall for this sweep: `plot_recall_latency.py` instead plots
 grouped curves at a fixed `ef_search`.
 
@@ -85,8 +151,9 @@ python3 experiments/profiling/scripts/plot_ef_search_sweep.py \
 ```
 
 The script checks for all ten `ef_search` values and five repeats per
-dataset/algorithm. It writes PNG, PDF, SVG, and a CSV of plotted means and
-latency spread to that run's `plots/` directory. It reads performance
+dataset/configuration, plus equal recall between modes on each saved index.
+It writes PNG, PDF, SVG, and a CSV of plotted means and latency spread to
+that run's `plots/` directory. It reads performance
 observations, not instrumented per-query files in `results/`.
 
 Latency is measured in the timed pass with detailed counters disabled.

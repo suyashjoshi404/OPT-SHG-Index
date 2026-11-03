@@ -22,6 +22,7 @@ using Clock = std::chrono::steady_clock;
 
 struct Options {
     std::string dataset = "sift", algorithm = "hnsw";
+    std::string prefetch_mode;
     fs::path data_root;
     fs::path data_file, query_file, groundtruth_file, output_file, performance_file,
             layer_averages_file, index_file;
@@ -114,6 +115,7 @@ static Options parse_args(int argc, char** argv) {
         if (key == "--help") {
             std::cout << "Usage: hnsw_profile --algorithm hnsw|shg --dataset sift|enron [--M N] [--ef-construction N] "
                          "[--ef-search 64] [--k 10] [--warmup 500] [--seed 100] [--threads 1] [--data-root PATH] [--data-file PATH] "
+                         "[--prefetch-mode native|off (HNSW); baseline|skip|lookahead|cluster (SHG)] "
                          "[--query-file PATH] [--groundtruth-file PATH] [--output PATH] "
                          "[--performance-output PATH] [--layer-averages-output PATH] [--index-file PATH] "
                          "[--build-only|--search-only] [--force] [--check-data]\n";
@@ -123,6 +125,7 @@ static Options parse_args(int argc, char** argv) {
         const std::string value = argv[i];
         if (key == "--dataset") opts.dataset = value;
         else if (key == "--algorithm") opts.algorithm = value;
+        else if (key == "--prefetch-mode") opts.prefetch_mode = value;
         else if (key == "--data-root") opts.data_root = value;
         else if (key == "--seed") opts.seed = integer_arg(argv[i], "seed", 0);
         else if (key == "--threads") {
@@ -155,6 +158,14 @@ static Options parse_args(int argc, char** argv) {
     if (opts.M > 10000) throw std::runtime_error("M must be at most 10000");
     if (opts.algorithm != "hnsw" && opts.algorithm != "shg")
         throw std::runtime_error("--algorithm must be hnsw or shg");
+    if (opts.prefetch_mode.empty())
+        opts.prefetch_mode = opts.algorithm == "hnsw" ? "native" : "lookahead";
+    if (opts.algorithm == "hnsw" && opts.prefetch_mode != "native" && opts.prefetch_mode != "off")
+        throw std::runtime_error("HNSW --prefetch-mode must be native or off");
+    if (opts.algorithm == "shg" && opts.prefetch_mode != "baseline" &&
+        opts.prefetch_mode != "skip" && opts.prefetch_mode != "lookahead" &&
+        opts.prefetch_mode != "cluster")
+        throw std::runtime_error("SHG --prefetch-mode must be baseline, skip, lookahead, or cluster");
     if (opts.check_data && opts.build_only)
         throw std::runtime_error("--check-data requires query and ground truth files; omit --build-only");
     if (opts.build_only && opts.search_only)
@@ -320,6 +331,16 @@ static int run(const Options& opts) {
     if constexpr (SHG)
         index.resultsProcessing.assign(static_cast<size_t>(base_count) * layers, -1);
     index.setEf(opts.ef_search);
+    if constexpr (SHG) {
+        const hnswlib::PrefetchMode mode =
+            opts.prefetch_mode == "baseline" ? hnswlib::PrefetchMode::Baseline :
+            opts.prefetch_mode == "skip" ? hnswlib::PrefetchMode::Skip :
+            opts.prefetch_mode == "cluster" ? hnswlib::PrefetchMode::Cluster :
+            hnswlib::PrefetchMode::SkipAndLookahead;
+        index.setPrefetchMode(mode);
+    } else {
+        index.setSearchPrefetch(opts.prefetch_mode == "native");
+    }
     const auto search = [&](uint32_t id, hnswlib::HNSWStats* stats) {
         if constexpr (SHG) {
             Query query(static_cast<int>(base_count + id), opts.k);

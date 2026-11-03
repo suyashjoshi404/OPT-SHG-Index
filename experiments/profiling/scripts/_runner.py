@@ -25,6 +25,10 @@ def main(algorithm, phase):
         parser.add_argument("--k", type=int, default=10)
         parser.add_argument("--ef-search", type=int, default=64)
         parser.add_argument("--warmup", type=int, default=500)
+        parser.add_argument("--prefetch-mode",
+                            choices=("native", "off") if algorithm == "hnsw" else
+                                    ("baseline", "skip", "lookahead", "cluster"),
+                            default="native" if algorithm == "hnsw" else "lookahead")
         parser.add_argument("--query-file")
         parser.add_argument("--groundtruth-file")
         parser.add_argument("--output")
@@ -41,18 +45,22 @@ def main(algorithm, phase):
         experiment_root / "indexes" / args.dataset
         / f"{args.dataset}_{algorithm}_M{args.M}.index"
     )
+    mode_tag = ""
+    if phase == "search" and args.prefetch_mode != ("native" if algorithm == "hnsw" else "lookahead"):
+        mode_tag = f"_{args.prefetch_mode}"
     args.performance_output = args.performance_output or str(
-        experiment_root / "observations" / f"{args.dataset}_{algorithm}_performance.csv"
+        experiment_root / "observations"
+        / f"{args.dataset}_{algorithm}{mode_tag}_performance.csv"
     )
     if phase == "search":
         args.output = args.output or str(
-            experiment_root / "results" / args.dataset / algorithm
+            experiment_root / "results" / args.dataset / (algorithm + mode_tag)
             / f"M{args.M}_efc{args.ef_construction}_ef{args.ef_search}"
             / "layer_stats.csv"
         )
         args.layer_averages_output = args.layer_averages_output or str(
             experiment_root / "observations"
-            / f"{args.dataset}_{algorithm}_layer_averages.csv"
+            / f"{args.dataset}_{algorithm}{mode_tag}_layer_averages.csv"
         )
     executable = args.executable.expanduser().resolve()
     if not executable.is_file():

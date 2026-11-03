@@ -80,7 +80,11 @@ int main(int argc, char** argv) {
         for (size_t q = n; q < n + nq; ++q) {
             for (auto* predicate : {static_cast<hnswlib::BaseFilterFunctor*>(nullptr),
                                     static_cast<hnswlib::BaseFilterFunctor*>(&filter)}) {
+                hnsw.setSearchPrefetch(false);
                 const auto baseline = hnsw.searchKnn(vectors[q].data(), q, k, predicate);
+                hnsw.setSearchPrefetch(true);
+                require(same_results(baseline, hnsw.searchKnn(vectors[q].data(), q, k, predicate)),
+                        "HNSW prefetch hints changed results");
                 hnswlib::HNSWStats stats;
                 space.calls = 0;
                 require(same_results(baseline, hnsw.searchKnn(vectors[q].data(), q, k, predicate, &stats)),
@@ -127,7 +131,15 @@ int main(int argc, char** argv) {
             shg.addDataPoint(vectors[q].data(), q, -1, performance);
             loaded.addDataPoint(vectors[q].data(), q, -1, performance);
             Query query(q, k);
+            shg.setPrefetchMode(hnswlib::PrefetchMode::Baseline);
             const auto baseline = shg.searchKnnShortcuts(query);
+            for (auto mode : {hnswlib::PrefetchMode::Skip,
+                              hnswlib::PrefetchMode::SkipAndLookahead,
+                              hnswlib::PrefetchMode::Cluster}) {
+                shg.setPrefetchMode(mode);
+                require(same_results(baseline, shg.searchKnnShortcuts(query)),
+                        "SHG prefetch mode changed results");
+            }
             hnswlib::HNSWStats stats;
             space.calls = 0;
             require(same_results(baseline, shg.searchKnnShortcuts(query, nullptr, &stats)), "SHG counters changed results");
