@@ -1,52 +1,88 @@
-# Shortcut-enabled Hierarchical Graph (SHG) index
+# Improving Performance of Hierarchical Graphs
 
-## Introduction
+Run all commands from the repository root. The Enron archive (`enron.zip`) is
+in the repository root. Supply `sift.zip` and `gist.zip` locally if you want to
+run SIFT or GIST; they are excluded from Git. Extracted datasets are also
+excluded from Git. You need a C++17 compiler, CMake 3.16+, Python 3.8+, and
+Matplotlib for plotting.
 
-This repository implements the SHG index on top of [hnswlib](https://github.com/nmslib/hnswlib). `pgm` is the learned index used for shortcuts; `hnswlib/heds.h` implements SHG.
+## Set up the datasets
 
-## Compilation 
-
-```bash
-mkdir build
-cd build
-cmake ..
-make
-```
-
-## Usage 
-`./example_search {algName} {dataset} {k}`
+Create a directory for each dataset you have and unzip its archive into that
+directory. For example, to set up all three:
 
 ```bash
-./example_search heds enron 20
-```
-This runs a 20-nearest-neighbor search on Enron. Unzip the dataset into `enron/` first.
-
-## Dataset
-Input data such as `enron.data_new` use this binary layout:
-```
-{Bytes of the data type (int)} {The size of the vectors (int)} {The dimension of the vectors (int)} {All of the binary vector, arranged in turn (float)}
-```
-Convert other datasets to this format, name the file `[datasetName].data_new`, and update the data path.
-
-## Native HNSW/SHG profiling
-
-For reproducible SIFT1M and Enron build/search measurements, query-local
-per-layer hops and distance statistics, recall and CSV reports, see
-[experiments/profiling/README.md](experiments/profiling/README.md).
-
-## SHG software prefetching
-
-SHG search defaults to shortcut destination prefetching and two-neighbor
-lookahead in the base layer. The hints do not change graph traversal or
-distance calculations. Select a mode on an `HEDS` instance before searching:
-
-```cpp
-index.setPrefetchMode(hnswlib::PrefetchMode::Baseline);          // no hints
-index.setPrefetchMode(hnswlib::PrefetchMode::Skip);              // destination only
-index.setPrefetchMode(hnswlib::PrefetchMode::SkipAndLookahead);  // default
-index.setPrefetchMode(hnswlib::PrefetchMode::Cluster);           // also prefetch two neighbors
+mkdir -p experiments/profiling/data/{sift,enron,gist}
+unzip sift.zip -d experiments/profiling/data/sift
+unzip enron.zip -d experiments/profiling/data/enron
+unzip gist.zip -d experiments/profiling/data/gist
 ```
 
-Cluster mode builds a small per-node lookup table and is optional because its
-extra memory traffic can make searches slower. Mode changes should happen
-between searches, not concurrently with them.
+The archives contain files directly at their root, so each dataset's files
+end up in `experiments/profiling/data/<dataset>/`. If the files are already
+present there, you can skip the corresponding unzip command.
+
+## Run the experiments
+
+1. Build the native HNSW/SHG profiler:
+
+   ```bash
+   bash experiments/profiling/scripts/build_profiler.sh
+   ```
+
+2. Build the HNSW and SHG indexes. Existing complete indexes are reused:
+
+   ```bash
+   bash experiments/profiling/scripts/build_sweep_indexes.sh
+   ```
+
+3. Search the saved indexes across efSearch values:
+
+   ```bash
+   bash experiments/profiling/scripts/run_ef_search_sweep.sh
+   ```
+
+   The default sweep covers all three datasets, ten efSearch values, and five
+   repeats. Each benchmark run is named `run_N`.
+
+4. Plot recall versus latency and QPS. Replace `run_1` with the run number
+   printed in step 3:
+
+   ```bash
+   python3 experiments/profiling/scripts/plot_ef_search_sweep.py \
+     experiments/profiling/observations/ef_search_sweep/run_1
+   ```
+
+   The recall–latency plot needs different efSearch values to show a curve.
+
+Indexes are saved under `experiments/profiling/indexes/`. Query results go to
+`experiments/profiling/results/ef_search_sweep/run_N/`; performance CSVs and
+plots go to `experiments/profiling/observations/ef_search_sweep/run_N/`.
+Use `--help` on either sweep script for options. For a short SIFT run, pass
+`--datasets "sift"` to both scripts and `--ef-values "20 64 128" --repeats 1`
+to the search script. Add `--force` to the index script to rebuild indexes.
+
+## Simple Enron example
+
+1. Build the profiler if you have not already:
+
+   ```bash
+   bash experiments/profiling/scripts/build_profiler.sh
+   ```
+
+2. Build one HNSW and one SHG index on Enron, then search both with `k=20`
+   and `efSearch=64`:
+
+   ```bash
+   bash experiments/profiling/scripts/example_enron.sh
+   ```
+
+3. Inspect the performance CSVs:
+
+   ```bash
+   head -n 3 experiments/profiling/observations/enron_example/hnsw_search.csv
+   head -n 3 experiments/profiling/observations/enron_example/shg_search.csv
+   ```
+
+The indexes are in `experiments/profiling/indexes/enron/`. Per-query results
+are in `experiments/profiling/results/enron_example/`.

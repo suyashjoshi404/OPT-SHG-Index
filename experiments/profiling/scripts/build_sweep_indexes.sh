@@ -4,7 +4,6 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
-script_dir=experiments/profiling/scripts
 data_root=experiments/profiling/data
 index_root=experiments/profiling/indexes
 executable=build/profiling/hnsw_profile
@@ -57,7 +56,7 @@ done
 [[ $ef_construction =~ ^[0-9]+$ && $ef_construction -ge 1 ]] || die "--ef-construction must be positive"
 [[ $seed =~ ^[0-9]+$ ]] || die "--seed must be a nonnegative integer"
 if [[ " ${datasets[*]} " == *" gist "* ]]; then
-  [[ -f $executable ]] || die "Missing profiler binary: $executable; build it as described in experiments/profiling/README.md"
+  [[ -f $executable ]] || die "Missing profiler binary: $executable; build it as described in README.md"
   profiler_help=$("$executable" --help 2>&1) || die "Cannot run profiler binary: $executable"
   [[ $profiler_help == *'--dataset sift|enron|gist'* ]] ||
     die "Profiler binary lacks GIST support: $executable. Rebuild it with: cmake --build build/profiling --target hnsw_profile -j2"
@@ -76,10 +75,10 @@ for dataset in "${datasets[@]}"; do
     force_args=()
     if $force; then force_args=(--force); fi
     printf 'Building %s %s -> %s\n' "$dataset" "$algorithm" "$index_file"
-    python3 "$script_dir/build_${algorithm}_index.py" \
+    "$executable" --algorithm "$algorithm" --build-only \
       --dataset "$dataset" --data-root "$data_root" \
       --M "$M" --ef-construction "$ef_construction" --seed "$seed" \
-      --index-file "$index_file" --executable "$executable" \
+      --index-file "$index_file" \
       --performance-output "${index_file%.index}_build.csv" "${force_args[@]}"
   done
 done

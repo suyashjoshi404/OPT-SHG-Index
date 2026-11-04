@@ -13,7 +13,10 @@ var/
 *.pyc
 
 # Local profiling datasets, generated indexes and reports
-experiments/profiling/data
+experiments/profiling/data/
+/gist.zip
+/sift.zip
+/sift.zip.part-*
 experiments/profiling/indexes/
 experiments/profiling/results/
 *observations*/

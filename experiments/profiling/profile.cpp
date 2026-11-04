@@ -312,9 +312,11 @@ static int run(const Options& opts) {
             << dimension << ',' << index.M_ << ',' << index.ef_construction_ << ",,,1,"
             << build_seconds << ",,,," << shortcut_seconds << ',' << build_seconds + shortcut_seconds
             << ',' << opts.seed << ",\n";
-        std::cout << "Graph build: " << build_seconds << " s; shortcuts: " << shortcut_seconds
-                  << " s; total: " << build_seconds + shortcut_seconds << " s\n"
-                  << "Saved index: " << opts.index_file << '\n';
+        std::cout << (SHG ? "SHG" : "HNSW") << " index built (" << opts.dataset << ")\n"
+                  << "  Vectors: " << base_count << '\n'
+                  << "  Build time: " << build_seconds + shortcut_seconds << " s\n";
+        if constexpr (SHG) std::cout << "  Shortcut time: " << shortcut_seconds << " s\n";
+        std::cout << "  Saved index: " << opts.index_file << '\n';
         if (opts.build_only) return 0;
     }
 
@@ -368,6 +370,8 @@ static int run(const Options& opts) {
     for (uint32_t id = 0; id < query_file->count; ++id)
         timed_results += search(id, nullptr).size();
     const double search_seconds = std::chrono::duration<double>(Clock::now() - search_start).count();
+    static volatile uint64_t result_count_sink;
+    result_count_sink = timed_results;  // Keep timed searches observable without printing their result count.
 
     auto out = csv_file(opts.output_file,
         "dataset,algorithm,query_id,layer,nodes_on_layer,max_level,num_layers,M,ef_search,k,"
@@ -416,14 +420,16 @@ static int run(const Options& opts) {
             << row.full_distance_computations / nq << ',' << row.compressed_distance_computations / nq << ','
             << row.seed_distance_computations / nq << ',' << row.pruned_neighbors / nq << ',' << row.levels_skipped / nq << '\n';
     }
-    std::cout << "Algorithm: " << opts.algorithm << "; queries: " << query_file->count
-              << "; layers: " << layers << "; timed results: " << timed_results << '\n'
-              << "Search time: " << search_seconds << " s; latency: " << search_seconds / nq * 1e6
-              << " us/query; QPS: " << qps << "; recall@" << opts.k << ": " << average_recall << '\n'
-              << "Average hops: " << totals.nhops / nq << "; distance evaluations: " << totals.ndis / nq << '\n'
-              << "Per-query/per-layer CSV: " << opts.output_file << '\n'
-              << "Per-layer averages CSV: " << opts.layer_averages_file << '\n'
-              << "Performance CSV: " << opts.performance_file << '\n';
+    std::cout << (SHG ? "SHG" : "HNSW") << " search complete (" << opts.dataset << ")\n"
+              << "  Queries: " << query_file->count << "  Layers: " << layers << '\n'
+              << "  Search time: " << search_seconds << " s  Mean latency: " << search_seconds / nq * 1e6
+              << " us/query  QPS: " << qps << '\n'
+              << "  Recall@" << opts.k << ": " << average_recall
+              << "  Mean hops: " << totals.nhops / nq
+              << "  Mean distance evaluations: " << totals.ndis / nq << '\n'
+              << "  Per-query CSV: " << opts.output_file << '\n'
+              << "  Layer averages CSV: " << opts.layer_averages_file << '\n'
+              << "  Performance CSV: " << opts.performance_file << '\n';
     return 0;
 }
 

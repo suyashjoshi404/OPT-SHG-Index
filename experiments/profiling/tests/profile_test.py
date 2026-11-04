@@ -10,7 +10,6 @@ import tempfile
 from pathlib import Path
 
 EXECUTABLE = Path(sys.argv[1]).resolve()
-SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
 
 def run(*args, ok=True):
@@ -64,11 +63,10 @@ def main():
                 result = prefix.with_suffix(".results.csv")
                 averages = prefix.with_suffix(".averages.csv")
                 common = ["--dataset", dataset, "--data-root", root, "--M", 4,
-                          "--index-file", index, "--performance-output", performance,
-                          "--executable", EXECUTABLE]
-                build = [sys.executable, SCRIPTS / f"build_{algorithm}_index.py", *common,
+                          "--index-file", index, "--performance-output", performance]
+                build = [EXECUTABLE, "--algorithm", algorithm, "--build-only", *common,
                          "--ef-construction", 32, "--seed", 100]
-                search = [sys.executable, SCRIPTS / f"profile_{algorithm}_query.py", *common,
+                search = [EXECUTABLE, "--algorithm", algorithm, "--search-only", *common,
                           "--k", k, "--ef-search", 16, "--warmup", 3,
                           "--output", result, "--layer-averages-output", averages]
                 run(*build)
@@ -99,11 +97,11 @@ def main():
                         row.pop("query_latency_us")
                     assert first == variant_rows, "Prefetch mode changed graph work or recall"
                     if algorithm == "shg":
-                        no_prune_result = root / f"{dataset}_shg_noprune.results.csv"
+                        no_prune_result = root / f"{dataset}_shg_prototype_no_prune.results.csv"
                         run(*search, "--prefetch-mode", "baseline", "--base-pruning", "off",
                             "--output", no_prune_result,
-                            "--performance-output", root / f"{dataset}_shg_noprune.performance.csv",
-                            "--layer-averages-output", root / f"{dataset}_shg_noprune.averages.csv")
+                            "--performance-output", root / f"{dataset}_shg_prototype_no_prune.performance.csv",
+                            "--layer-averages-output", root / f"{dataset}_shg_prototype_no_prune.averages.csv")
                         no_prune_rows = read_csv(no_prune_result)
                         assert len(no_prune_rows) == len(first)
                         assert all(row["pruned_neighbors"] == "0" for row in no_prune_rows
@@ -139,7 +137,7 @@ def main():
                     companion = Path(str(index) + ".shg")
                     companion.rename(companion.with_suffix(".hidden"))
                     run(*search, ok=False)
-        print("Both datasets and algorithms: build/search wrappers, forced rebuilds, CSVs, repeatability and error handling passed")
+        print("Both datasets and algorithms: build/search, forced rebuilds, CSVs, repeatability and error handling passed")
 
 
 if __name__ == "__main__":

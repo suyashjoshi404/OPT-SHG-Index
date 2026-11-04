@@ -4,7 +4,6 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
-script_dir=experiments/profiling/scripts
 data_root=experiments/profiling/data
 index_root=experiments/profiling/indexes
 results_base=experiments/profiling/results/ef_search_sweep
@@ -12,7 +11,7 @@ observations_base=experiments/profiling/observations/ef_search_sweep
 executable=build/profiling/hnsw_profile
 run_id=
 datasets=(sift enron gist)
-configs=(hnsw_off hnsw_native shg_baseline shg_lookahead shg_noprune)
+configs=(hnsw_vanilla_pf_off hnsw_vanilla shg_vanilla shg_prototype_v1 shg_prototype_no_prune)
 ef_values=(20 24 32 48 64 96 128 192 256 512)
 M=48
 ef_construction=80
@@ -88,7 +87,7 @@ for dataset in "${datasets[@]}"; do
 done
 for config in "${configs[@]}"; do
   case "$config" in
-    hnsw_off|hnsw_native|hnsw_v2_filter|shg_baseline|shg_lookahead|shg_noprune|shg_v2_filter) ;;
+    hnsw_vanilla_pf_off|hnsw_vanilla|hnsw_pf_filter|shg_vanilla|shg_prototype_v1|shg_prototype_no_prune|shg_pf_filter) ;;
     *) die "Unknown configuration: $config" ;;
   esac
 done
@@ -96,7 +95,7 @@ for ef in "${ef_values[@]}"; do
   [[ $ef =~ ^[0-9]+$ && $ef -ge $k ]] || die "Each efSearch must be an integer at least k=$k"
 done
 
-[[ -f $executable ]] || die "Missing profiler binary: $executable; build it as described in experiments/profiling/README.md"
+[[ -f $executable ]] || die "Missing profiler binary: $executable; build it as described in README.md"
 if [[ " ${datasets[*]} " == *" gist "* ]]; then
   profiler_help=$("$executable" --help 2>&1) || die "Cannot run profiler binary: $executable"
   [[ $profiler_help == *'--dataset sift|enron|gist'* ]] ||
@@ -133,13 +132,13 @@ for dataset in "${datasets[@]}"; do
   for config in "${configs[@]}"; do
     algorithm=${config%%_*}
     case "$config" in
-      hnsw_off) mode=off; pruning_args=() ;;
-      hnsw_native) mode=native; pruning_args=() ;;
-      hnsw_v2_filter) mode=v2_filter; pruning_args=() ;;
-      shg_baseline) mode=baseline; pruning_args=(--base-pruning on) ;;
-      shg_lookahead) mode=lookahead; pruning_args=(--base-pruning on) ;;
-      shg_noprune) mode=baseline; pruning_args=(--base-pruning off) ;;
-      shg_v2_filter) mode=v2_filter; pruning_args=(--base-pruning on) ;;
+      hnsw_vanilla_pf_off) mode=off; pruning_args=() ;;
+      hnsw_vanilla) mode=native; pruning_args=() ;;
+      hnsw_pf_filter) mode=v2_filter; pruning_args=() ;;
+      shg_vanilla) mode=baseline; pruning_args=(--base-pruning on) ;;
+      shg_prototype_v1) mode=lookahead; pruning_args=(--base-pruning on) ;;
+      shg_prototype_no_prune) mode=baseline; pruning_args=(--base-pruning off) ;;
+      shg_pf_filter) mode=v2_filter; pruning_args=(--base-pruning on) ;;
     esac
     index_file="$index_root/$dataset/${dataset}_${algorithm}_sweep_M${M}_efc${ef_construction}_seed${seed}.index"
     for ef in "${ef_values[@]}"; do
@@ -148,12 +147,12 @@ for dataset in "${datasets[@]}"; do
       mkdir -p "$result_dir" "$observation_dir"
       for ((repeat=1; repeat<=repeats; repeat++)); do
         printf '%s %s efSearch=%s repeat=%s/%s\n' "$dataset" "$config" "$ef" "$repeat" "$repeats"
-        python3 "$script_dir/profile_${algorithm}_query.py" \
+        "$executable" --algorithm "$algorithm" --search-only \
           --dataset "$dataset" --data-root "$data_root" \
           --M "$M" --ef-construction "$ef_construction" \
           --k "$k" --ef-search "$ef" --threads 1 --warmup "$warmup" \
           --prefetch-mode "$mode" "${pruning_args[@]}" \
-          --index-file "$index_file" --executable "$executable" \
+          --index-file "$index_file" \
           --output "$result_dir/repeat${repeat}_layer_stats.csv" \
           --performance-output "$observation_dir/repeat${repeat}_performance.csv" \
           --layer-averages-output "$observation_dir/repeat${repeat}_layer_averages.csv"
