@@ -11,7 +11,7 @@
 namespace hnswlib {
 
 // Modes are per index, so separate indexes can be benchmarked independently.
-enum class PrefetchMode { Baseline, Skip, SkipAndLookahead, Cluster };
+enum class PrefetchMode { Baseline, Skip, SkipAndLookahead, Cluster, IDEA2_V2 = 5 };
 
 class PrefetchController {
  public:
@@ -22,6 +22,14 @@ class PrefetchController {
     static inline bool lookahead_enabled(PrefetchMode mode) {
         return mode == PrefetchMode::SkipAndLookahead || mode == PrefetchMode::Cluster;
     }
+
+    // Idea 2.0 is selected per index, like the existing prefetch modes.
+    static inline bool enable_v2(PrefetchMode mode) {
+        return mode == PrefetchMode::IDEA2_V2;
+    }
+
+    static constexpr size_t v2_dist = 2;
+    static constexpr size_t v2_lines = 3;
 
     static inline void prefetch_lines(const void* address, size_t bytes, size_t max_lines) {
         if (!address) return;
@@ -68,8 +76,47 @@ class PrefetchController {
     template <typename LinkFn>
     static inline void on_next_candidate(PrefetchMode mode, unsigned int node,
                                          LinkFn link, size_t link_bytes, size_t node_count) {
-        if (lookahead_enabled(mode) && node < node_count)
+        if ((lookahead_enabled(mode) || enable_v2(mode)) && node < node_count)
             prefetch_lines(link(node), link_bytes, 2);
+    }
+
+    template <typename VisitedType, typename VectorFn>
+    static inline void v2_prologue(PrefetchMode mode, const int* links, size_t count,
+                                   const VisitedType* visited, VectorFn vector,
+                                   size_t vector_bytes, size_t node_count) {
+        if (!enable_v2(mode)) return;
+        const size_t flags_to = std::min(2 * v2_dist, count);
+        const size_t vectors_to = std::min(v2_dist, count);
+        for (size_t k = 1; k <= flags_to; ++k) {
+            const int id = links[k];
+            if (id >= 0 && static_cast<size_t>(id) < node_count)
+                prefetch_lines(&visited[id], sizeof(VisitedType), 1);
+        }
+        for (size_t k = 1; k <= vectors_to; ++k) {
+            const int id = links[k];
+            if (id >= 0 && static_cast<size_t>(id) < node_count)
+                prefetch_lines(vector(static_cast<unsigned int>(id)), vector_bytes, v2_lines);
+        }
+    }
+
+    template <typename VisitedType, typename VectorFn>
+    static inline void v2_step(PrefetchMode mode, const int* links, size_t current,
+                               size_t count, const VisitedType* visited,
+                               VisitedType tag, VectorFn vector,
+                               size_t vector_bytes, size_t node_count) {
+        if (!enable_v2(mode)) return;
+        const size_t flag_pos = current + 2 * v2_dist;
+        const size_t vector_pos = current + v2_dist;
+        if (flag_pos <= count) {
+            const int id = links[flag_pos];
+            if (id >= 0 && static_cast<size_t>(id) < node_count)
+                prefetch_lines(&visited[id], sizeof(VisitedType), 1);
+        }
+        if (vector_pos <= count) {
+            const int id = links[vector_pos];
+            if (id >= 0 && static_cast<size_t>(id) < node_count && visited[id] != tag)
+                prefetch_lines(vector(static_cast<unsigned int>(id)), vector_bytes, v2_lines);
+        }
     }
 };
 

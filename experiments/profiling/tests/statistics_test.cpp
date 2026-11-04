@@ -85,6 +85,11 @@ int main(int argc, char** argv) {
                 hnsw.setSearchPrefetch(true);
                 require(same_results(baseline, hnsw.searchKnn(vectors[q].data(), q, k, predicate)),
                         "HNSW prefetch hints changed results");
+                hnsw.setSearchV2Filter(true);
+                require(same_results(baseline, hnsw.searchKnn(vectors[q].data(), q, k, predicate)),
+                        "HNSW v2 filter changed results");
+                hnsw.setSearchV2Filter(false);
+                hnsw.setSearchPrefetch(true);
                 hnswlib::HNSWStats stats;
                 space.calls = 0;
                 require(same_results(baseline, hnsw.searchKnn(vectors[q].data(), q, k, predicate, &stats)),
@@ -135,11 +140,20 @@ int main(int argc, char** argv) {
             const auto baseline = shg.searchKnnShortcuts(query);
             for (auto mode : {hnswlib::PrefetchMode::Skip,
                               hnswlib::PrefetchMode::SkipAndLookahead,
-                              hnswlib::PrefetchMode::Cluster}) {
+                              hnswlib::PrefetchMode::Cluster,
+                              hnswlib::PrefetchMode::IDEA2_V2}) {
                 shg.setPrefetchMode(mode);
                 require(same_results(baseline, shg.searchKnnShortcuts(query)),
                         "SHG prefetch mode changed results");
             }
+            shg.setPrefetchMode(hnswlib::PrefetchMode::Baseline);
+            shg.setBaseLayerPruning(false);
+            hnswlib::HNSWStats no_prune_stats;
+            require(!shg.searchKnnShortcuts(query, nullptr, &no_prune_stats).empty(),
+                    "SHG no-prune search returned no results");
+            require(no_prune_stats.layers[0].pruned_neighbors == 0,
+                    "SHG no-prune mode still pruned base-layer neighbors");
+            shg.setBaseLayerPruning(true);
             hnswlib::HNSWStats stats;
             space.calls = 0;
             require(same_results(baseline, shg.searchKnnShortcuts(query, nullptr, &stats)), "SHG counters changed results");
@@ -149,6 +163,10 @@ int main(int argc, char** argv) {
             require(stats.ndis == loaded_stats.ndis && stats.nhops == loaded_stats.nhops, "SHG save/load changed work");
             for (float value : shg.resultsProcessing) require(value == -1, "SHG query leaked scratch state");
             const auto vanilla = shg.searchKnnHNSW(query);
+            shg.setPrefetchMode(hnswlib::PrefetchMode::IDEA2_V2);
+            require(same_results(vanilla, shg.searchKnnHNSW(query)),
+                    "HEDS HNSW v2 filter changed results");
+            shg.setPrefetchMode(hnswlib::PrefetchMode::Baseline);
             hnswlib::HNSWStats vanilla_stats;
             space.calls = 0;
             require(same_results(vanilla, shg.searchKnnHNSW(query, nullptr, &vanilla_stats)), "HEDS vanilla counters changed results");

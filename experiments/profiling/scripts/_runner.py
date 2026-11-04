@@ -9,11 +9,11 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def main(algorithm, phase):
     parser = argparse.ArgumentParser(description=f"{phase.title()} {algorithm.upper()} with the native profiler")
-    parser.add_argument("--dataset", choices=("sift", "enron"), default="sift")
+    parser.add_argument("--dataset", choices=("sift", "enron", "gist"), default="sift")
     parser.add_argument("--M", type=int)
     parser.add_argument("--ef-construction", type=int)
     parser.add_argument("--threads", type=int, choices=(1,), default=1)
-    parser.add_argument("--data-root", help="Directory containing sift/ and enron/")
+    parser.add_argument("--data-root", help="Directory containing sift/, enron/, and gist/")
     parser.add_argument("--index-file")
     parser.add_argument("--performance-output")
     parser.add_argument("--executable", type=Path, default=ROOT / "build/profiling/hnsw_profile")
@@ -26,9 +26,11 @@ def main(algorithm, phase):
         parser.add_argument("--ef-search", type=int, default=64)
         parser.add_argument("--warmup", type=int, default=500)
         parser.add_argument("--prefetch-mode",
-                            choices=("native", "off") if algorithm == "hnsw" else
-                                    ("baseline", "skip", "lookahead", "cluster"),
+                            choices=("native", "off", "v2_filter") if algorithm == "hnsw" else
+                                    ("baseline", "skip", "lookahead", "cluster", "v2_filter"),
                             default="native" if algorithm == "hnsw" else "lookahead")
+        if algorithm == "shg":
+            parser.add_argument("--base-pruning", choices=("on", "off"), default="on")
         parser.add_argument("--query-file")
         parser.add_argument("--groundtruth-file")
         parser.add_argument("--output")
@@ -48,6 +50,8 @@ def main(algorithm, phase):
     mode_tag = ""
     if phase == "search" and args.prefetch_mode != ("native" if algorithm == "hnsw" else "lookahead"):
         mode_tag = f"_{args.prefetch_mode}"
+    if phase == "search" and algorithm == "shg" and args.base_pruning == "off":
+        mode_tag = "_noprune" if args.prefetch_mode == "baseline" else f"_{args.prefetch_mode}_noprune"
     args.performance_output = args.performance_output or str(
         experiment_root / "observations"
         / f"{args.dataset}_{algorithm}{mode_tag}_performance.csv"

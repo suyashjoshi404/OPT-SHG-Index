@@ -23,6 +23,7 @@ using Clock = std::chrono::steady_clock;
 struct Options {
     std::string dataset = "sift", algorithm = "hnsw";
     std::string prefetch_mode;
+    std::string base_pruning = "on";
     fs::path data_root;
     fs::path data_file, query_file, groundtruth_file, output_file, performance_file,
             layer_averages_file, index_file;
@@ -113,9 +114,10 @@ static Options parse_args(int argc, char** argv) {
         if (key == "--search-only") { opts.search_only = true; continue; }
         if (key == "--force") { opts.force = true; continue; }
         if (key == "--help") {
-            std::cout << "Usage: hnsw_profile --algorithm hnsw|shg --dataset sift|enron [--M N] [--ef-construction N] "
+            std::cout << "Usage: hnsw_profile --algorithm hnsw|shg --dataset sift|enron|gist [--M N] [--ef-construction N] "
                          "[--ef-search 64] [--k 10] [--warmup 500] [--seed 100] [--threads 1] [--data-root PATH] [--data-file PATH] "
-                         "[--prefetch-mode native|off (HNSW); baseline|skip|lookahead|cluster (SHG)] "
+                         "[--prefetch-mode native|off|v2_filter (HNSW); baseline|skip|lookahead|cluster|v2_filter (SHG)] "
+                         "[--base-pruning on|off (SHG only)] "
                          "[--query-file PATH] [--groundtruth-file PATH] [--output PATH] "
                          "[--performance-output PATH] [--layer-averages-output PATH] [--index-file PATH] "
                          "[--build-only|--search-only] [--force] [--check-data]\n";
@@ -126,6 +128,7 @@ static Options parse_args(int argc, char** argv) {
         if (key == "--dataset") opts.dataset = value;
         else if (key == "--algorithm") opts.algorithm = value;
         else if (key == "--prefetch-mode") opts.prefetch_mode = value;
+        else if (key == "--base-pruning") opts.base_pruning = value;
         else if (key == "--data-root") opts.data_root = value;
         else if (key == "--seed") opts.seed = integer_arg(argv[i], "seed", 0);
         else if (key == "--threads") {
@@ -149,8 +152,8 @@ static Options parse_args(int argc, char** argv) {
         else if (key == "--index-file") opts.index_file = value;
         else throw std::runtime_error("Unknown option: " + key);
     }
-    if (opts.dataset != "sift" && opts.dataset != "enron")
-        throw std::runtime_error("--dataset must be sift or enron");
+    if (opts.dataset != "sift" && opts.dataset != "enron" && opts.dataset != "gist")
+        throw std::runtime_error("--dataset must be sift, enron, or gist");
     if (opts.algorithm == "hnsw") {
         if (!opts.M_set) opts.M = 16;
         if (!opts.ef_construction_set) opts.ef_construction = 200;
@@ -160,12 +163,17 @@ static Options parse_args(int argc, char** argv) {
         throw std::runtime_error("--algorithm must be hnsw or shg");
     if (opts.prefetch_mode.empty())
         opts.prefetch_mode = opts.algorithm == "hnsw" ? "native" : "lookahead";
-    if (opts.algorithm == "hnsw" && opts.prefetch_mode != "native" && opts.prefetch_mode != "off")
-        throw std::runtime_error("HNSW --prefetch-mode must be native or off");
+    if (opts.algorithm == "hnsw" && opts.prefetch_mode != "native" &&
+        opts.prefetch_mode != "off" && opts.prefetch_mode != "v2_filter")
+        throw std::runtime_error("HNSW --prefetch-mode must be native, off, or v2_filter");
     if (opts.algorithm == "shg" && opts.prefetch_mode != "baseline" &&
         opts.prefetch_mode != "skip" && opts.prefetch_mode != "lookahead" &&
-        opts.prefetch_mode != "cluster")
-        throw std::runtime_error("SHG --prefetch-mode must be baseline, skip, lookahead, or cluster");
+        opts.prefetch_mode != "cluster" && opts.prefetch_mode != "v2_filter")
+        throw std::runtime_error("SHG --prefetch-mode must be baseline, skip, lookahead, cluster, or v2_filter");
+    if (opts.base_pruning != "on" && opts.base_pruning != "off")
+        throw std::runtime_error("--base-pruning must be on or off");
+    if (opts.algorithm == "hnsw" && opts.base_pruning != "on")
+        throw std::runtime_error("--base-pruning off is only supported for SHG");
     if (opts.check_data && opts.build_only)
         throw std::runtime_error("--check-data requires query and ground truth files; omit --build-only");
     if (opts.build_only && opts.search_only)
@@ -174,7 +182,8 @@ static Options parse_args(int argc, char** argv) {
         throw std::runtime_error("ef-search must be at least k");
     const fs::path root = "experiments/profiling";
     const fs::path data_dir = (opts.data_root.empty() ? root / "data" : opts.data_root) / opts.dataset;
-    if (opts.data_file.empty()) opts.data_file = data_dir / (opts.dataset == "sift" ? "sift_base.fvecs" : "enron.data_new");
+    if (opts.data_file.empty()) opts.data_file = data_dir /
+        (opts.dataset == "enron" ? "enron.data_new" : opts.dataset + "_base.fvecs");
     if (opts.query_file.empty()) opts.query_file = data_dir / (opts.dataset + "_query.fvecs");
     if (opts.groundtruth_file.empty()) opts.groundtruth_file = data_dir / (opts.dataset + "_groundtruth.ivecs");
     if (opts.output_file.empty()) opts.output_file = root / "results" / opts.dataset / opts.algorithm /
@@ -336,10 +345,13 @@ static int run(const Options& opts) {
             opts.prefetch_mode == "baseline" ? hnswlib::PrefetchMode::Baseline :
             opts.prefetch_mode == "skip" ? hnswlib::PrefetchMode::Skip :
             opts.prefetch_mode == "cluster" ? hnswlib::PrefetchMode::Cluster :
+            opts.prefetch_mode == "v2_filter" ? hnswlib::PrefetchMode::IDEA2_V2 :
             hnswlib::PrefetchMode::SkipAndLookahead;
         index.setPrefetchMode(mode);
+        index.setBaseLayerPruning(opts.base_pruning == "on");
     } else {
         index.setSearchPrefetch(opts.prefetch_mode == "native");
+        index.setSearchV2Filter(opts.prefetch_mode == "v2_filter");
     }
     const auto search = [&](uint32_t id, hnswlib::HNSWStats* stats) {
         if constexpr (SHG) {

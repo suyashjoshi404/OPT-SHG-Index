@@ -16,5 +16,5 @@ var/
 experiments/profiling/data
 experiments/profiling/indexes/
 experiments/profiling/results/
-experiments/profiling/observations/
+*observations*/
 __pycache__/

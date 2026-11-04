@@ -1,6 +1,6 @@
 # Native HNSW and SHG profiling
 
-This experiment builds and profiles SIFT1M or Enron with native
+This experiment builds and profiles SIFT1M, Enron, or GIST with native
 `hnswlib::HierarchicalNSW<float>` (HNSW) and `hnswlib::HEDS<float>` (SHG).
 HNSW can run with its existing search-time software prefetch hints enabled
 (`native`) or disabled (`off`). SHG has its own shortcut-aware prefetch modes.
@@ -16,15 +16,37 @@ sudo apt install build-essential cmake python3 numactl
 ```
 
 ```bash
-cmake -S experiments/profiling -B build/profiling -DCMAKE_BUILD_TYPE=Release
-cmake --build build/profiling -j2
+bash experiments/profiling/scripts/build_profiler.sh --optimization O3
 ```
 
-The driver uses one thread and builds with `-O3` and `-march=native` when
-supported. Pass `-DPROFILING_NATIVE=OFF` to CMake for a portable binary.
-OpenMP and fast-math are disabled. Rebuild after changing headers or the
-driver. Run `ctest --test-dir build/profiling --output-on-failure` to check the
-driver with small fixtures, or set `-DBUILD_TESTING=OFF` to build only the driver.
+To compare compiler optimization modes while keeping both binaries:
+
+```bash
+bash experiments/profiling/scripts/build_profiler.sh --optimization O3 --build-dir build/profiling-o3
+bash experiments/profiling/scripts/build_profiler.sh --optimization Ofast --build-dir build/profiling-ofast
+```
+
+Pass `--executable build/profiling-o3/hnsw_profile` or
+`--executable build/profiling-ofast/hnsw_profile` to the Python build/search
+scripts. Give search runs separate `--output`, `--performance-output`, and
+`--layer-averages-output` paths so their results remain distinct. Without
+`--build-dir`, the build script updates `build/profiling`.
+It accepts `--jobs N` and `--native off` (disables `-march=native`). You can
+also configure CMake directly with `-DPROFILING_OPTIMIZATION=O3` or `Ofast`.
+
+The driver uses one thread. `O3` is the default; `Ofast` enables additional
+optimizations including fast math. OpenMP is disabled in both modes, so
+`Ofast` alone does not reproduce the root example's build settings. Rebuild
+the binary after changing headers or the driver. Run
+`ctest --test-dir build/profiling --output-on-failure` to check the driver with
+small fixtures (the script builds only `hnsw_profile`; build the test targets
+first with `cmake --build build/profiling`).
+
+For a search-only comparison, reuse the same saved HNSW index or SHG
+`.index`/`.index.shg` pair with both binaries. Changing optimization mode does
+not require rebuilding indexes. Rebuild with each mode only if you also want
+to compare index construction or the graphs it produces; fast math can change
+floating-point decisions during construction.
 
 ## Prepare data
 
@@ -37,10 +59,13 @@ sift/sift_groundtruth.ivecs
 enron/enron.data_new
 enron/enron_query.fvecs
 enron/enron_groundtruth.ivecs
+gist/gist_base.fvecs
+gist/gist_query.fvecs
+gist/gist_groundtruth.ivecs
 ```
 
 The `data` directory may be a symlink. For another location, pass
-`--data-root PATH` pointing to a directory containing `sift/` or `enron/`.
+`--data-root PATH` pointing to a directory containing `sift/`, `enron/`, or `gist/`.
 Base vectors use fvecs (an `int32` dimension and float32 values per record)
 or `data_new` (uint32 element byte size, vector count, and dimension, then
 float32 values). Queries use fvecs; ground truth uses ivecs (record width and
@@ -57,7 +82,10 @@ Full loading also checks record headers, lengths, and dimensions.
 
 ## Build indexes and profile queries
 
-The following runs four search configurations on SIFT1M. Both graph builds
+For the simplest three-command build, index, and efSearch sweep workflow, see
+[BENCHMARKING.md](BENCHMARKING.md).
+
+The following runs five search configurations on SIFT1M. Both graph builds
 use `M=48`, `ef_construction=80`, and seed `100`. Each pair of modes loads
 the same index for its algorithm. The two algorithms build different graphs.
 Run these commands from the repository root after building the driver:
@@ -77,9 +105,12 @@ python3 experiments/profiling/scripts/profile_shg_query.py --dataset sift --M 48
 
 # HEDS/SHG with shortcut destination and base-layer lookahead prefetching
 python3 experiments/profiling/scripts/profile_shg_query.py --dataset sift --M 48 --ef-construction 80 --k 20 --ef-search 64 --prefetch-mode lookahead
+
+# Experimental bench_prune counterpart: SHG without base-layer pruning or added prefetch hints
+python3 experiments/profiling/scripts/profile_shg_query.py --dataset sift --M 48 --ef-construction 80 --k 20 --ef-search 64 --prefetch-mode baseline --base-pruning off
 ```
 
-Replace `sift` with `enron` in every command to run Enron. Existing index
+Replace `sift` with `enron` or `gist` in every command for those datasets. Existing index
 files are protected: add `--force` to a build command only when intentionally
 rebuilding it. SHG `baseline` disables the added search prefetch hints;
 `skip` enables destination prefetching alone, while `cluster` also prefetches
@@ -87,10 +118,17 @@ two candidate neighbors. Cluster mode is experimental. The defaults are
 `native` for HNSW and `lookahead` for SHG. Set the mode before timing; no
 rebuild is needed to switch modes.
 
-These are **search-time** modes. Each algorithm's two runs differ only in
-search prefetch hints and reuse their algorithm's saved index. Native HNSW's
-build-time prefetch instructions remain unchanged in both HNSW runs. SHG uses
-a different index and search procedure from HNSW.
+`--base-pruning off` disables SHG's two base-layer screening checks while
+keeping upper-layer pruning, shortcuts, and the usual result-heap stopping
+rule. It is an adaptation of `SHG_noprune` from
+`/home/suyash/opt-SHG/SHG-Index/bench_prune`, using
+this profiler's saved SHG index and timing method. Its recall and search work
+may differ from the pruned SHG modes. The default is `--base-pruning on`.
+
+These are **search-time** modes. The paired HNSW runs and the paired pruned
+SHG runs differ only in prefetch hints. All SHG runs reuse their saved index.
+Native HNSW's build-time prefetch instructions remain unchanged in both HNSW
+runs. SHG uses a different index and search procedure from HNSW.
 The Python wrappers give nondefault modes distinct default result and
 observation paths; for repeated runs, specify unique `--output`,
 `--performance-output`, and `--layer-averages-output` paths.
@@ -104,7 +142,7 @@ python3 experiments/profiling/scripts/build_shg_index.py --dataset sift --M 48 -
 python3 experiments/profiling/scripts/profile_shg_query.py --dataset sift --M 48 --k 10 --ef-search 64
 ```
 
-Use `--dataset enron` for Enron. Both algorithms require `--threads 1`;
+Use `--dataset enron` or `--dataset gist` for the other datasets. Both algorithms require `--threads 1`;
 search requires `ef-search >= k`, with k no greater than the base count or
 ground-truth width. Defaults are HNSW `M=16`, `ef-construction=200`; SHG
 `M=48`, `ef-construction=80`; and `seed=100`, `k=10`, `ef-search=64`,

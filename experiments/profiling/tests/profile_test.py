@@ -98,6 +98,16 @@ def main():
                     for row in variant_rows:
                         row.pop("query_latency_us")
                     assert first == variant_rows, "Prefetch mode changed graph work or recall"
+                    if algorithm == "shg":
+                        no_prune_result = root / f"{dataset}_shg_noprune.results.csv"
+                        run(*search, "--prefetch-mode", "baseline", "--base-pruning", "off",
+                            "--output", no_prune_result,
+                            "--performance-output", root / f"{dataset}_shg_noprune.performance.csv",
+                            "--layer-averages-output", root / f"{dataset}_shg_noprune.averages.csv")
+                        no_prune_rows = read_csv(no_prune_result)
+                        assert len(no_prune_rows) == len(first)
+                        assert all(row["pruned_neighbors"] == "0" for row in no_prune_rows
+                                   if row["layer"] == "0")
                 finally:
                     hidden.rename(base)
                 assert digests == [hashlib.sha256(path.read_bytes()).digest() for path in saved]

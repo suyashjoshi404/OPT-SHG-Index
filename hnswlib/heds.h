@@ -92,6 +92,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
     std::vector<dist_t> resultsProcessing;
     PrefetchMode prefetch_mode_ = PrefetchMode::SkipAndLookahead;
+    bool base_layer_pruning_enabled_ = true;
     std::vector<std::array<tableint, 2>> cluster_targets_;
 
 
@@ -225,6 +226,10 @@ class HEDS : public AlgorithmInterface<dist_t> {
         prefetch_mode_ = mode;
         if (mode == PrefetchMode::Cluster) buildPrefetchTargets();
         else cluster_targets_.clear();
+    }
+
+    void setBaseLayerPruning(bool enabled) {
+        base_layer_pruning_enabled_ = enabled;
     }
 
     void buildPrefetchTargets() {
@@ -848,10 +853,18 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
 
 
+            PrefetchController::v2_prologue(
+                prefetch_mode_, data, size, visited_array,
+                [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                data_size_, cur_element_count);
             for (size_t j = 1; j <= size; j++) {
                 int candidate_id = *(data + j);
                 PrefetchController::on_neighbor_lookahead(
                     prefetch_mode_, data, j, size, visited_array,
+                    [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                    data_size_, cur_element_count);
+                PrefetchController::v2_step(
+                    prefetch_mode_, data, j, size, visited_array, visited_array_tag,
                     [this](tableint id) -> const void* { return getDataByInternalId(id); },
                     data_size_, cur_element_count);
 //                    if (candidate_id == 0) continue;
@@ -874,6 +887,9 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
                     if (flag_consider_candidate) {
                         candidate_set.emplace(-dist, candidate_id);
+                        if (PrefetchController::enable_v2(prefetch_mode_))
+                            PrefetchController::prefetch_lines(
+                                get_linklist0(candidate_set.top().second), size_links_level0_, 1);
 
                         if (bare_bone_search || 
                             (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))))) {
@@ -1002,21 +1018,33 @@ class HEDS : public AlgorithmInterface<dist_t> {
             hops++;
             
 
+            PrefetchController::v2_prologue(
+                prefetch_mode_, data, size, visited_array,
+                [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                data_size_, cur_element_count);
             for (size_t j = 1; j <= size; j++) {
                 int candidate_id = *(data + j);
                 PrefetchController::on_neighbor_lookahead(
                     prefetch_mode_, data, j, size, visited_array,
                     [this](tableint id) -> const void* { return getDataByInternalId(id); },
                     data_size_, cur_element_count);
+                PrefetchController::v2_step(
+                    prefetch_mode_, data, j, size, visited_array, visited_array_tag,
+                    [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                    data_size_, cur_element_count);
 
+                // Match bench_prune's no-prune path: avoid screening an already visited node.
+                if (!base_layer_pruning_enabled_ &&
+                    visited_array[candidate_id] == visited_array_tag) continue;
 
-                if(pruneDisCompute(lowerBound, 0, queryID, candidate_id, resultsProcessing)){
+                if(base_layer_pruning_enabled_ &&
+                   pruneDisCompute(lowerBound, 0, queryID, candidate_id, resultsProcessing)){
                     purneBaseNumDis ++;
                     if (stats) stats->layers[0].pruned_neighbors++;
                     continue;
                 }
 
-                if(hops > 20 && top_candidates.size() >= ef){
+                if(base_layer_pruning_enabled_ && hops > 20 && top_candidates.size() >= ef){
                     //dist_t approDis = getDisByLevel(queryID, candidate_id, maxFixLevel_);
                     dist_t approDis = getDisByCompressedVector(queryID, candidate_id, 2);
                     if (stats) stats->add_distance(0, true);
@@ -1046,6 +1074,9 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
                     if (flag_consider_candidate) {
                         candidate_set.emplace(-dist, candidate_id);
+                        if (PrefetchController::enable_v2(prefetch_mode_))
+                            PrefetchController::prefetch_lines(
+                                get_linklist0(candidate_set.top().second), size_links_level0_, 1);
                         updateNum++;
                         //searchUpdate.push_back(std::make_pair(updateNum, baseNumDis));
 

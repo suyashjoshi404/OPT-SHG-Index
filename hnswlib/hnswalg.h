@@ -3,6 +3,7 @@
 #include "visited_list_pool.h"
 #include "hnswlib.h"
 #include "search_stats.h"
+#include "prefetch_controller.h"
 #include <atomic>
 #include <random>
 #include <stdlib.h>
@@ -32,6 +33,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     size_t ef_construction_{0};
     size_t ef_{ 0 };
     bool search_prefetch_enabled_ = true;
+    bool search_v2_filter_enabled_ = false;
 
     double mult_{0.0}, revSize_{0.0};
     int maxlevel_{0};
@@ -181,6 +183,12 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
     void setSearchPrefetch(bool enabled) {
         search_prefetch_enabled_ = enabled;
+        if (enabled) search_v2_filter_enabled_ = false;
+    }
+
+    void setSearchV2Filter(bool enabled) {
+        search_v2_filter_enabled_ = enabled;
+        if (enabled) search_prefetch_enabled_ = false;
     }
 
 
@@ -381,6 +389,12 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 metric_distance_computations+=size;
             }
 
+            if (search_v2_filter_enabled_ && !candidate_set.empty())
+                PrefetchController::on_next_candidate(
+                    PrefetchMode::IDEA2_V2, candidate_set.top().second,
+                    [this](tableint id) -> const void* { return get_linklist0(id); },
+                    size_links_level0_, cur_element_count);
+
 #ifdef USE_SSE
             if (search_prefetch_enabled_) {
             _mm_prefetch((char *) (visited_array + *(data + 1)), _MM_HINT_T0);
@@ -390,6 +404,11 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             }
 #endif
 
+            if (search_v2_filter_enabled_)
+                PrefetchController::v2_prologue(
+                    PrefetchMode::IDEA2_V2, data, size, visited_array,
+                    [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                    data_size_, cur_element_count);
             for (size_t j = 1; j <= size; j++) {
                 int candidate_id = *(data + j);
 //                    if (candidate_id == 0) continue;
@@ -400,6 +419,11 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                                 _MM_HINT_T0);  ////////////
                 }
 #endif
+                if (search_v2_filter_enabled_)
+                    PrefetchController::v2_step(
+                        PrefetchMode::IDEA2_V2, data, j, size, visited_array, visited_array_tag,
+                        [this](tableint id) -> const void* { return getDataByInternalId(id); },
+                        data_size_, cur_element_count);
                 if (!(visited_array[candidate_id] == visited_array_tag)) {
                     visited_array[candidate_id] = visited_array_tag;
 
@@ -416,6 +440,9 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
                     if (flag_consider_candidate) {
                         candidate_set.emplace(-dist, candidate_id);
+                        if (search_v2_filter_enabled_)
+                            PrefetchController::prefetch_lines(
+                                get_linklist0(candidate_set.top().second), size_links_level0_, 1);
 #ifdef USE_SSE
                         if (search_prefetch_enabled_) {
                         _mm_prefetch(data_level0_memory_ + candidate_set.top().second * size_data_per_element_ +
